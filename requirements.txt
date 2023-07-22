@@ -8,3 +8,5 @@ faiss-cpu
 pyworld
 numpy>=1.23.5
 langchain==0.0.142
+torchcrepe
+espnet

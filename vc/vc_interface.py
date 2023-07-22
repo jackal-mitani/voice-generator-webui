@@ -2,7 +2,7 @@ import pathlib
 import numpy as np
 import torch
 
-from .infer_pack.models import SynthesizerTrnMs256NSFsid, SynthesizerTrnMs256NSFsid_nono
+from .infer_pack.models import SynthesizerTrnMs256NSFsid, SynthesizerTrnMs256NSFsid_nono, SynthesizerTrnMs768NSFsid, SynthesizerTrnMs768NSFsid_nono
 from .vc_infer_pipeline import VC
 from fairseq import checkpoint_utils
 from scipy.signal import resample
@@ -16,7 +16,7 @@ is_half = True  # NVIDIA 20 series and higher GPUs are half-precise with no chan
 def get_vc(sid):
     weight_root = "vc/models"
     person = f"{weight_root}/{sid}/{sid}.pth"
-    global cpt
+    global cpt, tgt_sr, version
     # global n_spk, tgt_sr, net_g, vc
     # if (sid == []):
     #     global hubert_model
@@ -40,16 +40,22 @@ def get_vc(sid):
     tgt_sr = cpt["config"][-1]
     cpt["config"][-3] = cpt["weight"]["emb_g.weight"].shape[0]  # n_spk
     if_f0 = cpt.get("f0", 1)
-    if (if_f0 == 1):
-        net_g = SynthesizerTrnMs256NSFsid(*cpt["config"], is_half=is_half)
-    else:
-        net_g = SynthesizerTrnMs256NSFsid_nono(*cpt["config"])
-
+    version = cpt.get("version", "v1")
+    if version == "v1":
+        if if_f0 == 1:
+            net_g = SynthesizerTrnMs256NSFsid(*cpt["config"], is_half=is_half)
+        else:
+            net_g = SynthesizerTrnMs256NSFsid_nono(*cpt["config"])
+    elif version == "v2":
+        if if_f0 == 1:
+            net_g = SynthesizerTrnMs768NSFsid(*cpt["config"], is_half=is_half)
+        else:
+            net_g = SynthesizerTrnMs768NSFsid_nono(*cpt["config"])
     del net_g.enc_q
     net_g.load_state_dict(cpt["weight"], strict=False)
     net_g.eval().to(device)
 
-    if (is_half):
+    if is_half:
         net_g = net_g.half()
     else:
         net_g = net_g.float()
@@ -116,7 +122,31 @@ def convert_voice(hubert_model, model, net_g, input_audio, vcid, f0_up_key, f0_m
     if_f0 = cpt.get("f0", 1)
     sr = int(cpt.get("sr", 1).replace("k", "")) * 1000
 
-    return sr, model.pipeline(hubert_model, net_g, sid, audio, times, f0_up_key, f0_method, file_index, file_big_npy, index_rate, if_f0, f0_file=f0_file)
+    filter_radius = 3
+    resample_sr = 0
+    rms_mix_rate = 1
+    protect = 0.33
+    return sr, model.pipeline(
+            hubert_model,
+            net_g,
+            sid,
+            audio,
+            "-",
+            times,
+            f0_up_key,
+            f0_method,
+            file_index,
+            # file_big_npy,
+            index_rate,
+            if_f0,
+            filter_radius,
+            tgt_sr,
+            resample_sr,
+            rms_mix_rate,
+            version,
+            protect,
+            f0_file=f0_file,
+        )
 
 
 def batch_convert(input_dir, output_dir, hubert_model, model, net_g, vcid, f0_up_key, f0_method):
