@@ -64,24 +64,26 @@ class TextEncoder256(nn.Module):
 class TextEncoder768(nn.Module):
     def __init__(
         self,
-        out_channels,
-        hidden_channels,
-        filter_channels,
-        n_heads,
-        n_layers,
-        kernel_size,
-        p_dropout,
-        f0=True,
+        out_channels: int,
+        hidden_channels: int,
+        filter_channels: int,
+        emb_channels: int,
+        n_heads: int,
+        n_layers: int,
+        kernel_size: int,
+        p_dropout: int,
+        f0: bool = True,
     ):
         super().__init__()
         self.out_channels = out_channels
         self.hidden_channels = hidden_channels
         self.filter_channels = filter_channels
+        self.emb_channels = emb_channels
         self.n_heads = n_heads
         self.n_layers = n_layers
         self.kernel_size = kernel_size
         self.p_dropout = p_dropout
-        self.emb_phone = nn.Linear(768, hidden_channels)
+        self.emb_phone = nn.Linear(emb_channels, hidden_channels)
         self.lrelu = nn.LeakyReLU(0.1, inplace=True)
         if f0 == True:
             self.emb_pitch = nn.Embedding(256, hidden_channels)  # pitch 256
@@ -91,10 +93,17 @@ class TextEncoder768(nn.Module):
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
     def forward(self, phone, pitch, lengths):
-        if pitch == None:
+        if pitch is None:
             x = self.emb_phone(phone)
         else:
+            # pitch データの長さを phone データと同じにする
+            if phone.size(1) != pitch.size(1):
+                # pitch データを phone データと同じ長さにリサイズ
+                pitch = F.interpolate(pitch.unsqueeze(0).float(), size=phone.size(1), mode='linear', align_corners=False).squeeze(0)
+            # pitch データを整数型にキャスト
+            pitch = pitch.long()  # CUDAテンソルの場合でも動作する            
             x = self.emb_phone(phone) + self.emb_pitch(pitch)
+        
         x = x * math.sqrt(self.hidden_channels)  # [b, t, h]
         x = self.lrelu(x)
         x = torch.transpose(x, 1, -1)  # [b, h, t]
@@ -413,10 +422,11 @@ class SourceModuleHnNSF(torch.nn.Module):
 
     def forward(self, x, upp=None):
         sine_wavs, uv, _ = self.l_sin_gen(x, upp)
-        if self.is_half:
+        if self.is_half == True:
             sine_wavs = sine_wavs.half()
         sine_merge = self.l_tanh(self.l_linear(sine_wavs))
         return sine_merge, None, None  # noise, uv
+
 
 
 class GeneratorNSF(torch.nn.Module):
@@ -502,6 +512,9 @@ class GeneratorNSF(torch.nn.Module):
             x = F.leaky_relu(x, modules.LRELU_SLOPE)
             x = self.ups[i](x)
             x_source = self.noise_convs[i](har_source)
+            # x_source のサイズを x のサイズに合わせる
+            if x_source.size(2) != x.size(2):
+                x_source = F.interpolate(x_source, size=(x.size(2)), mode='linear', align_corners=False)            
             x = x + x_source
             xs = None
             for j in range(self.num_kernels):
@@ -550,7 +563,7 @@ class SynthesizerTrnMs256NSFsid(nn.Module):
         spk_embed_dim,
         gin_channels,
         sr,
-        **kwargs
+        is_half=False,  # 修正済み
     ):
         super().__init__()
         if type(sr) == type("strr"):
@@ -665,6 +678,7 @@ class SynthesizerTrnMs768NSFsid(nn.Module):
         upsample_kernel_sizes,
         spk_embed_dim,
         gin_channels,
+        emb_channels,
         sr,
         **kwargs
     ):
@@ -687,12 +701,16 @@ class SynthesizerTrnMs768NSFsid(nn.Module):
         self.upsample_kernel_sizes = upsample_kernel_sizes
         self.segment_size = segment_size
         self.gin_channels = gin_channels
+        self.emb_channels = emb_channels
+        self.sr = sr
         # self.hop_length = hop_length#
         self.spk_embed_dim = spk_embed_dim
+        
         self.enc_p = TextEncoder768(
             inter_channels,
             hidden_channels,
             filter_channels,
+            emb_channels,
             n_heads,
             n_layers,
             kernel_size,
@@ -723,7 +741,14 @@ class SynthesizerTrnMs768NSFsid(nn.Module):
             inter_channels, hidden_channels, 5, 1, 3, gin_channels=gin_channels
         )
         self.emb_g = nn.Embedding(self.spk_embed_dim, gin_channels)
-        print("gin_channels:", gin_channels, "self.spk_embed_dim:", self.spk_embed_dim)
+        print(
+            "gin_channels:",
+            gin_channels,
+            "self.spk_embed_dim:",
+            self.spk_embed_dim,
+            "emb_channels:",
+            emb_channels,
+        )
 
     def remove_weight_norm(self):
         self.dec.remove_weight_norm()
@@ -747,19 +772,13 @@ class SynthesizerTrnMs768NSFsid(nn.Module):
         o = self.dec(z_slice, pitchf, g=g)
         return o, ids_slice, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
 
-    def infer(self, phone, phone_lengths, pitch, nsff0, sid, rate=None):
+    def infer(self, phone, phone_lengths, pitch, nsff0, sid, max_len=None):
         g = self.emb_g(sid).unsqueeze(-1)
         m_p, logs_p, x_mask = self.enc_p(phone, pitch, phone_lengths)
         z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask
-        if rate:
-            head = int(z_p.shape[2] * rate)
-            z_p = z_p[:, :, -head:]
-            x_mask = x_mask[:, :, -head:]
-            nsff0 = nsff0[:, -head:]
         z = self.flow(z_p, x_mask, g=g, reverse=True)
-        o = self.dec(z * x_mask, nsff0, g=g)
+        o = self.dec((z * x_mask)[:, :, :max_len], nsff0, g=g)
         return o, x_mask, (z, z_p, m_p, logs_p)
-
 
 class SynthesizerTrnMs256NSFsid_nono(nn.Module):
     def __init__(
@@ -782,7 +801,7 @@ class SynthesizerTrnMs256NSFsid_nono(nn.Module):
         spk_embed_dim,
         gin_channels,
         sr=None,
-        **kwargs
+        is_half=False,  # 修正済み
     ):
         super().__init__()
         self.spec_channels = spec_channels
@@ -888,7 +907,7 @@ class SynthesizerTrnMs768NSFsid_nono(nn.Module):
         spk_embed_dim,
         gin_channels,
         sr=None,
-        **kwargs
+        is_half=False,  # 修正済み
     ):
         super().__init__()
         self.spec_channels = spec_channels
@@ -1140,3 +1159,4 @@ class DiscriminatorP(torch.nn.Module):
         x = torch.flatten(x, 1, -1)
 
         return x, fmap
+    
