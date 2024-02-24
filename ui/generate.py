@@ -27,7 +27,7 @@ def lang_change(lang):
         speaker_list = [line.strip() for line in file.readlines()]
 
     model = tts_interface.load_model(lang_dic[lang])
-    return gr.Dropdown.update(choices=speaker_list)
+    return gr.update(choices=speaker_list)
 
 
 def vc_change(vcid):
@@ -38,38 +38,81 @@ def vc_change(vcid):
 
 
 def text2speech(lang, text, sid, vcid, pitch, f0method, length_scale):
+    global model, speaker_list, vc, net_g, hubert_model  # ここに 'vc' と 'net_g' を追加
     phonemes, tts_audio = tts_interface.generate_speech(model, lang, text, speaker_list.index(sid), False, length_scale)
     if vcid != 'No conversion':
-        return phonemes, vc_interface.convert_voice(hubert_model, vc, net_g, tts_audio, vcid, pitch, f0method)
-
+        if vc is not None and net_g is not None:
+            print(f"text2speech - vcid: {vcid}, pitch: {pitch}, f0method: {f0method}")
+            return phonemes, vc_interface.convert_voice(hubert_model, vc, net_g, tts_audio, vcid, pitch, f0method)
     return phonemes, tts_audio
 
-
 def acc2speech(lang, text, sid, vcid, pitch, f0method, length_scale):
+    global model, speaker_list, vc, net_g, hubert_model
     _, tts_audio = tts_interface.generate_speech(model, lang, text, speaker_list.index(sid), True, length_scale)
     if vcid != 'No conversion':
+        # ログ出力を追加
+        print(f"acc2speech - vcid: {vcid}, pitch: {pitch}, f0method: {f0method}")
         return vc_interface.convert_voice(hubert_model, vc, net_g, tts_audio, vcid, pitch, f0method)
-
     return tts_audio
 
 
-def save_preset(preset_name, lang_dropdown, sid, vcid, pitch, f0method, speed):
+def save_preset(preset_name: str, lang_dropdown: str, sid: str, vcid: str, pitch: int, f0method: str, speed: float):
+    print(f"save_preset called with preset_name={preset_name}, lang_dropdown={lang_dropdown}, sid={sid}, vcid={vcid}, pitch={pitch}, f0method={f0method}, speed={speed}")
     path = 'ui/speaker_presets.json'
-    with open(path, "r", encoding="utf-8") as file:
-        data = json.load(file)
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+            print("Loaded existing presets successfully.")
+    except FileNotFoundError:
+        print(f"File {path} not found. Creating a new one.")
+        data = {}
 
-    data[preset_name] = {}
-    data[preset_name]['lang'] = lang_dropdown
-    data[preset_name]['sid'] = speaker_list.index(sid)
-    data[preset_name]['vcid'] = vcid
-    data[preset_name]['pitch'] = pitch
-    data[preset_name]['f0method'] = f0method
-    data[preset_name]['speed'] = speed
+    if preset_name in data:
+        print(f"Preset name '{preset_name}' already exists. Overwriting...")
+    else:
+        print(f"Creating new preset with name '{preset_name}'.")
 
-    # 更新されたデータをJSONファイルに書き込み
-    with open(path, "w", encoding="utf-8") as file:
-        json.dump(data, file, indent=2, ensure_ascii=False)
+    data[preset_name] = {
+        'lang': lang_dropdown,
+        'sid': speaker_list.index(sid),  # Make sure speaker_list is accessible
+        'vcid': vcid,
+        'pitch': pitch,
+        'f0method': f0method,
+        'speed': speed
+    }
 
+    try:
+        with open(path, "w", encoding="utf-8") as file:
+            json.dump(data, file, indent=2, ensure_ascii=False)
+            print(f"Preset '{preset_name}' saved successfully.")
+            return "Preset saved successfully."  # 成功メッセージを返す
+    except Exception as e:
+        print(f"Failed to save preset '{preset_name}'. Error: {e}")
+        return f"Error: Failed to save preset. {e}"  # エラーメッセージを返す
+
+def load_presets():
+    try:
+        with open('ui/speaker_presets.json', 'r', encoding='utf-8') as file:
+            data = json.load(file)
+        return ["Select a preset"] + list(data.keys())
+    except FileNotFoundError:
+        return ["Select a preset"]
+
+def apply_preset(preset_name):
+    if preset_name == "Select a preset":
+        return "", "Select a language", "No conversion", 0, "pm", 1.0
+    
+    try:
+        with open('ui/speaker_presets.json', 'r', encoding='utf-8') as file:
+            data = json.load(file)
+            preset = data[preset_name]
+            
+            # Ensure speaker list is updated
+            lang_change(preset['lang'])
+            return preset['lang'], speaker_list[preset['sid']], preset['vcid'], preset['pitch'], preset['f0method'], preset['speed']
+    except Exception as e:
+        print(f"Failed to apply preset '{preset_name}'. Error: {e}")
+        return "", "Select a language", "No conversion", 0, "pm", 1.0
 
 def ui():
     with gr.TabItem('Generate'):
@@ -82,8 +125,8 @@ def ui():
                 acc2speech_bt = gr.Button("Generate From Phones", variant="primary")
 
             with gr.Column():
-                lang_dropdown = gr.inputs.Dropdown(choices=list(lang_dic.keys()), label="Languages",)
-                sid = gr.inputs.Dropdown(choices=[], label="Speaker")
+                lang_dropdown = gr.Dropdown(choices=list(lang_dic.keys()), label="Languages",)
+                sid = gr.Dropdown(choices=[], label="Speaker")
                 lang_dropdown.change(
                     fn=lang_change,
                     inputs=[lang_dropdown],
@@ -91,7 +134,7 @@ def ui():
                 )
                 speed = gr.Slider(minimum=0.1, maximum=2, step=0.1, label='Speed', value=1)
 
-                vcid = gr.inputs.Dropdown(choices=vc_models, label="Voice Conversion", default='No conversion')
+                vcid = gr.Dropdown(choices=vc_models, label="Voice Conversion", value='No conversion')
                 vcid.change(
                     fn=vc_change,
                     inputs=[vcid]
@@ -102,11 +145,19 @@ def ui():
 
                 preset_name = gr.Textbox(label="Preset Name", interactive=True)
                 save_preset_bt = gr.Button("Save Preset")
+                save_preset_message = gr.Label()  # 成功またはエラーメッセージを表示するためのLabel
+                
+                presets_dropdown = gr.Dropdown(label="Presets", choices=load_presets())
+                presets_dropdown.change(fn=apply_preset, inputs=[presets_dropdown], outputs=[lang_dropdown, sid, vcid, pitch, f0method, speed])
+
                 save_preset_bt.click(
                     fn=save_preset,
                     inputs=[preset_name, lang_dropdown, sid, vcid, pitch, f0method, speed],
+                    outputs=[save_preset_message]  # Labelを更新するように指定
                 )
 
+                
+                
         with gr.Row():
             output_audio = gr.Audio(label="Output Audio", type='numpy')
             text2speech_bt.click(
