@@ -259,8 +259,22 @@ class VC(object):
             pitchff[pitchf > 0] = 1
             pitchff[pitchf < 1] = protect
             pitchff = pitchff.unsqueeze(-1)
+            
+            # pitchffのシーケンス長をfeatsに合わせる処理を修正
+            if pitchff.size(1) != feats.size(1):
+                # シーケンス長をfeatsに合わせて調整
+                # torch.nn.functional.interpolateは最後の次元に適用されるため、permuteが必要
+                pitchff = torch.nn.functional.interpolate(pitchff.permute(0, 2, 1), size=feats.size(1), mode='linear', align_corners=False)
+                pitchff = pitchff.permute(0, 2, 1)  # 元の次元に戻す
+                
+            # デバッグ情報を出力
+            print("feats shape:", feats.shape)
+            print("pitchff shape:", pitchff.shape)
+            print("feats0 shape:", feats0.shape)            
+            
             feats = feats * pitchff + feats0 * (1 - pitchff)
             feats = feats.to(feats0.dtype)
+            
         p_len = torch.tensor([p_len], device=self.device).long()
         with torch.no_grad():
             if pitch != None and pitchf != None:
