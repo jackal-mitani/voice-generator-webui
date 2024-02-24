@@ -18,6 +18,29 @@ with open('ui/speaker_presets.json', 'r', encoding="utf-8") as file:
     global presets
     presets = json.load(file)
 
+def calculate_current_rms(audio_data: np.ndarray) -> float:
+    """Calculate the RMS level of the given audio data."""
+    audio_float = audio_data.astype(np.float32)
+    current_rms = np.sqrt(np.mean(audio_float**2))
+    return current_rms
+
+    # オーディオデータの現在のRMS値を計算
+    current_rms = calculate_current_rms(audio_data)
+    print(f"Current RMS: {current_rms}")    
+    
+def rms_normalization(audio_data: np.ndarray, target_rms: float = 0.02) -> np.ndarray:
+    """Normalize the audio data to a target RMS level."""
+    # Ensure audio data is float
+    audio_float = audio_data.astype(np.float32)
+    current_rms = np.sqrt(np.mean(audio_float**2))
+    
+    if current_rms > 0:
+        normalization_factor = target_rms / current_rms
+        normalized_audio = audio_float * normalization_factor
+        # Convert back to original data type
+        return normalized_audio.astype(audio_data.dtype)
+    else:
+        return audio_data    
 
 def generate_dialogues(dialogues, selected_presets, llm_output, silence_duration):
     audio_data = {}
@@ -41,10 +64,22 @@ def generate_dialogues(dialogues, selected_presets, llm_output, silence_duration
 
                 audio_data[key] = audio
 
-    return llm_output, vc_interface.concat_audio(audio_data, silence_duration)
+    # Concatenate audio
+    concatenated_audio = vc_interface.concat_audio(audio_data, silence_duration)
+    
+    # 現在のオーディオデータのRMSレベルを計算する（新規追加部分）
+    current_rms = calculate_current_rms(concatenated_audio[1])
+    print(f"Current RMS level before normalization: {current_rms}")
+    
+    # Apply RMS normalization to the concatenated audio
+    normalized_concatenated_audio = rms_normalization(concatenated_audio[1], target_rms=0.1)
+    concatenated_audio = (concatenated_audio[0], normalized_concatenated_audio)
+
+    return llm_output, concatenated_audio     
 
 
 def generate_with_llm(prompt, selected_presets, temperature, max_tokens, silence_duration, progress=gr.Progress()):
+    print("Selected presets:", selected_presets)  # 選択されたプリセットをログ出力
     if max_tokens == 0:
         max_tokens = None
     executor = llm_interface.set_description_agent(temperature, max_tokens)
@@ -58,6 +93,7 @@ def generate_with_llm(prompt, selected_presets, temperature, max_tokens, silence
 
 
 def generate(llm_output, selected_presets, silence_duration):
+    print("Selected presets:", selected_presets)  # 選択されたプリセットをログ出力
     dialogues = llm_interface.parse(llm_output).return_values['output'][0]
     return generate_dialogues(dialogues, selected_presets, llm_output, silence_duration)
 
